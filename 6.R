@@ -1,7 +1,6 @@
-# Load necessary libraries
+
 library(MASS)
 
-# Define the covariance matrices (Ensure these are the ones from Question 5)
 cov_matrix_yield <- matrix(
   c(1.420517e-07, -1.684827e-08, 1.635268e-09, 3.834781e-07, 9.999913e-08,
     -1.684827e-08, 3.620438e-07, 1.614207e-07, 3.251919e-07, 6.590317e-07,
@@ -18,11 +17,10 @@ cov_matrix_forward <- matrix(
     0.022472286, 0.319247866, 0.030967656, -0.74074577, 0.39253647),
   nrow = 5, byrow = TRUE)
 
-# Compute Eigenvalues and Eigenvectors
 eigen_yield <- eigen(cov_matrix_yield)
 eigen_forward <- eigen(cov_matrix_forward)
 
-# Print Eigenvalues and Eigenvectors
+
 print("Eigenvalues (Yield):")
 print(eigen_yield$values)
 print("Eigenvectors (Yield):")
@@ -33,7 +31,7 @@ print(eigen_forward$values)
 print("Eigenvectors (Forward):")
 print(eigen_forward$vectors)
 
-# Interpretation
+
 largest_eigenvalue_yield <- eigen_yield$values[1]
 largest_eigenvector_yield <- eigen_yield$vectors[,1]
 

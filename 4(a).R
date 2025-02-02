@@ -1,71 +1,79 @@
-# Load necessary libraries
 library(ggplot2)
 library(dplyr)
-library(readr)
+library(lubridate)
+library(rootSolve)
 
-# Install and load necessary package
-if (!require(rootSolve)) install.packages("rootSolve", dependencies=TRUE)
-library(rootSolve)  # For numerical root finding
+bonds <- read.csv("modified.csv", stringsAsFactors = FALSE)
 
-# Load bond data
-bonds <- read.csv("filtered_data/filtered_bonds.csv")
+bonds$Coupon <- as.numeric(sub("%", "", bonds$Coupon)) / 100
+bonds$Maturity.Date <- as.Date(bonds$Maturity.Date, format="%Y-%m-%d")
 
-# Convert dates and compute time to maturity
-bonds$Maturity.Date <- as.Date(bonds$Maturity.Date, format="%m/%d/%Y")
-bonds$Issue.Date <- as.Date(bonds$Issue.Date, format="%m/%d/%Y")
-bonds$Time_to_Maturity <- as.numeric(difftime(bonds$Maturity.Date, Sys.Date(), units="days")) / 365
+settlement_date <- as.Date("2025-01-06")
 
-# Sort bonds by maturity
-bonds <- bonds %>% arrange(Time_to_Maturity)
-
-# Convert Coupon to numeric format
-bonds$Coupon <- as.numeric(sub("%", "", bonds$Coupon)) / 100  # Convert percentage to decimal
-
-# Extract closing price columns (dates as variables)
-closing_price_columns <- grep("^X2025", colnames(bonds), value = TRUE)
-
-# Function to compute YTM iteratively
-ytm_function <- function(y, P, C, F, N) {
-  return(P - sum(C / (1 + y/2)^(1:N)) - F / (1 + y/2)^N)
+accrued_interest <- function(issue_date, maturity_date, coupon_rate, settlement_date) {
+  coupon_period <- 6
+  last_coupon_date <- seq(maturity_date, by = "-6 months", length.out = ceiling(as.numeric(difftime(maturity_date, issue_date, units="days")) / 180))
+  last_coupon_date <- max(last_coupon_date[last_coupon_date <= settlement_date])
+  
+  n_days <- as.numeric(difftime(settlement_date, last_coupon_date, units="days"))
+  accrued <- (n_days / 365) * (coupon_rate * 100)
+  return(accrued)
 }
 
-# Compute YTM for Each Bond and Each Day
-compute_ytm <- function(bond_data, closing_prices) {
-  ytm_curve_list <- list()
+compute_ytm <- function(dirty_price, face_value, coupon, maturity, settlement) {
+  time_to_maturity <- as.numeric(difftime(maturity, settlement, units="days")) / 365
   
-  for (date_col in closing_prices) {
-    bond_data$Close_Price <- bond_data[[date_col]]
-    ytm_values <- numeric(nrow(bond_data))
-    
-    for (i in 1:nrow(bond_data)) {
-      bond <- bond_data[i, ]
-      P <- bond$Close_Price  # Closing price of bond
-      C <- bond$Coupon / 2 * 100  # Semi-annual coupon payment
-      F <- 100  # Assume face value is 100
-      N <- bond$Time_to_Maturity * 2  # Convert to semi-annual periods
-      
-      # Solve for YTM using numerical root-finding
-      ytm_values[i] <- uniroot(ytm_function, c(0, 1), P = P, C = C, F = F, N = N)$root * 100  # Convert to %
-    }
-    
-    ytm_curve_list[[date_col]] <- data.frame(Maturity = bond_data$Maturity.Date, YTM = ytm_values, Date = as.Date(sub("X", "", date_col), format="%Y.%m.%d"))
+  bond_price_eq <- function(r) {
+    sum_coupon <- sum(coupon * face_value * exp(-r * (1:floor(2 * time_to_maturity) / 2)))
+    price <- sum_coupon + face_value * exp(-r * time_to_maturity)
+    return(price - dirty_price)
   }
   
-  return(do.call(rbind, ytm_curve_list))
+  ytm_solution <- tryCatch({
+    uniroot(bond_price_eq, c(-0.05, 0.5))$root
+  }, error = function(e) NA)
+  
+  return(ytm_solution)
 }
 
-# Compute YTM for each date
-ytms_all <- compute_ytm(bonds, closing_price_columns)
+ytm_results <- data.frame()
+debug_data <- data.frame()
 
-# Save the YTM table for further use
-write.csv(ytms_all, "ytm_results.csv", row.names = FALSE)
+for (date_col in names(bonds)[6:15]) {
+  settlement_date <- as.Date(sub("X", "", date_col), format="%Y.%m.%d")
+  
+  for (i in 1:nrow(bonds)) {
+    clean_price <- as.numeric(bonds[i, date_col])
+    accrued <- accrued_interest(bonds$Issue.Date[i], bonds$Maturity.Date[i], bonds$Coupon[i], settlement_date)
+    dirty_price <- clean_price + accrued
+    ytm <- compute_ytm(dirty_price, 100, bonds$Coupon[i] / 2, bonds$Maturity.Date[i], settlement_date)
+    
+    if (is.na(ytm) || ytm > 0.2) {
+      print(paste("⚠️ Potential Issue: Bond", bonds$ISIN[i], "on", settlement_date,
+                  "| Clean Price:", clean_price, "| Accrued:", accrued,
+                  "| Dirty Price:", dirty_price, "| YTM:", ytm))
+    }
+    
+    ytm_results <- rbind(ytm_results, data.frame(Date=settlement_date, ISIN=bonds$ISIN[i], Maturity=bonds$Maturity.Date[i], YTM=ytm))
+    debug_data <- rbind(debug_data, data.frame(Date=settlement_date, ISIN=bonds$ISIN[i], CleanPrice=clean_price, Accrued=accrued, DirtyPrice=dirty_price, YTM=ytm))
+  }
+}
 
-# Plot the YTM Curve
-ggplot(ytms_all, aes(x = Maturity, y = YTM, color = as.factor(Date))) +
-  geom_line(size = 1, alpha = 0.7) +
-  geom_point(size = 2) +
-  scale_x_date(breaks = unique(ytms_all$Maturity), date_labels = "%m/%d/%Y") +  # Show all Maturity Dates
-  labs(title = "5-Year Yield Curve Across Days", x = "Maturity Date", y = "Yield to Maturity (%)", color = "Date") +
+print(debug_data)
+
+ggplot(ytm_results, aes(x=Maturity, y=YTM, color=factor(Date))) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(breaks = as.Date(c("2025-03-01", "2025-09-01", 
+                                  "2026-03-01", "2026-09-01", 
+                                  "2027-03-01", "2027-09-01", 
+                                  "2028-03-01", "2028-09-01", 
+                                  "2029-03-01", "2029-09-01")), 
+               date_labels = "%b %Y") +
+  labs(title="5-Year Yield Curve (YTM)", 
+       x="Maturity Date", 
+       y="Yield-to-Maturity (Continuous Compounding)", 
+       color="Date") +
   theme_minimal()
 
 ggsave("yield_curve.png", width = 10, height = 6, dpi = 300)
